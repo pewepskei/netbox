@@ -1,0 +1,167 @@
+services:
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: netbox-postgres
+    restart: unless-stopped
+    networks:
+      - netbox
+
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+
+  redis:
+    image: redis:8-alpine
+    container_name: netbox-redis
+    restart: unless-stopped
+    networks:
+      - netbox
+
+    command: >
+      redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+
+    volumes:
+      - redis_data:/data
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+
+  redis-cache:
+    image: redis:8-alpine
+    container_name: netbox-redis-cache
+    restart: unless-stopped
+    networks:
+      - netbox
+
+    command: >
+      redis-server --appendonly yes --requirepass ${REDIS_CACHE_PASSWORD}
+
+    volumes:
+      - redis_cache_data:/data
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_CACHE_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+
+  netbox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    networks:
+      - proxy-net
+      - netbox
+
+    container_name: netbox
+    restart: unless-stopped
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+
+    env_file:
+      - .env
+
+    environment:
+      SECRET_KEY: ${SECRET_KEY}
+
+      DB_HOST: postgres
+      DB_PORT: 5432
+
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+      REDIS_CACHE_HOST: redis-cache
+      REDIS_CACHE_PORT: 6379
+      REDIS_CACHE_PASSWORD: ${REDIS_CACHE_PASSWORD}
+
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS}
+      TIME_ZONE: ${TIME_ZONE}
+
+      SUPERUSER_NAME: ${SUPERUSER_NAME}
+      SUPERUSER_EMAIL: ${SUPERUSER_EMAIL}
+      SUPERUSER_PASSWORD: ${SUPERUSER_PASSWORD}
+
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS}
+      GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT}
+
+    ports:
+      - "${NETBOX_PORT}:8080"
+
+    volumes:
+      - ./:/opt/netbox
+      - netbox_media:/opt/netbox/media
+      - netbox_reports:/opt/netbox/reports
+      - netbox_scripts:/opt/netbox/scripts
+      - netbox_static:/opt/netbox/static
+
+    entrypoint: ["/opt/netbox/initialize.sh"]
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/"]
+
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: netbox-worker
+    restart: unless-stopped
+    networks:
+      - netbox
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      netbox:
+        condition: service_healthy
+
+    env_file:
+      - .env
+
+    volumes:
+      - ./:/opt/netbox
+
+    command: ["python", "manage.py", "rqworker"]
+
+
+volumes:
+  postgres_data:
+  redis_data:
+  redis_cache_data:
+  netbox_media:
+  netbox_reports:
+  netbox_scripts:
+  netbox_static:
+
+networks:
+  proxy-net:
+    external: true
+  netbox:
